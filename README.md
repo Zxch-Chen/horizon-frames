@@ -41,3 +41,7 @@ cd template && python3 -m http.server 8765
 ```
 
 Open http://localhost:8765/horizon.html. Add `?frame=7` to hold one frame, or `?intro=1` to replay the intro.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
