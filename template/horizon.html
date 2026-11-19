@@ -1,0 +1,853 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Horizon</title>
+  <!-- Horizon frames: a montage of one curved planet horizon rendered in a different
+       material each cut, cutting faster and faster (1.5s to ~3ms), landing on a starry
+       end card that stays. Every frame is drawn live by the WebGL shader below.
+       Edit TITLE / NAME and the content in <main>. Add materials to the shader and to FRAMES.
+       Debug: ?frame=N holds one frame (?frame=end for the end card); ?intro=1 replays. -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,300..600;1,8..60,300..500&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --serif: "Source Serif 4", "Iowan Old Style", Georgia, serif;
+      --ease: cubic-bezier(.22, .8, .24, 1);
+      --night: #070b12; --text: #eef0f2; --dim: #8a94a2;
+      --H: .55;                  /* horizon height, shared by every shot */
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html { background: var(--night); }
+    body { background: var(--night); color: var(--dim); font-family: var(--serif); font-size: 19px; line-height: 1.62; -webkit-font-smoothing: antialiased; }
+    body.playing { overflow: hidden; }
+    a { color: var(--text); text-decoration: none; }
+    a:hover { text-decoration: underline; text-underline-offset: .2em; }
+    .hero { position: relative; height: 100svh; min-height: 480px; overflow: hidden;
+      background: radial-gradient(120% 60% at 50% calc(var(--H) * 100%), #1d3346 0%, #0c1320 45%, #0a1019 100%); }
+    .hero canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+    .cap { position: absolute; left: 0; right: 0; bottom: calc((1 - var(--H)) * 100% + clamp(10px, 1.4vw, 18px));
+      text-align: center; color: var(--cap, var(--text)); font-weight: 400; font-size: clamp(32px, 4.4vw, 58px);
+      line-height: 1; letter-spacing: -.01em; pointer-events: none; text-shadow: 0 0 24px rgba(0,0,0,var(--cap-shadow,.25)); }
+    .cap.focus { animation: focus .55s var(--ease) both; }
+    .cap.focus-slow { animation: focus 1.6s var(--ease) both; }
+    @keyframes focus { from { opacity: 0; filter: blur(12px); } to { opacity: 1; filter: blur(0); } }
+    .cap a { color: inherit; pointer-events: auto; }
+    .skip { position: absolute; right: 22px; bottom: 20px; z-index: 5; font: inherit; font-size: 14px; color: rgba(255,255,255,.55); background: none; border: 0; cursor: pointer; padding: 6px; }
+    body:not(.playing) .skip { display: none; }
+    .doc { position: relative; z-index: 2; max-width: 680px; margin: 0 auto;
+      margin-top: calc((var(--H) - 1) * 100svh + clamp(44px, 6vh, 72px)); padding: 0 24px 120px; }
+    .doc > * { transition: opacity 1.3s var(--ease), filter 1.3s var(--ease); transition-delay: calc(var(--base, 0s) + var(--i, 0) * 110ms); }
+    body.hide-doc .doc > * { opacity: 0; filter: blur(6px); }
+    .doc h2 { color: var(--text); font: inherit; margin: 72px 0 20px; }
+    @media (max-width: 600px) { :root { --H: .5; } body { font-size: 17.5px; } }
+    @media (prefers-reduced-motion: reduce) { .cap.focus, .cap.focus-slow { animation: none; } .doc > * { transition: none; } }
+  </style>
+</head>
+<body class="hide-doc">
+  <header class="hero" id="hero">
+    <canvas id="film" aria-hidden="true"></canvas>
+    <h1 class="cap" id="cap"></h1>
+    <button class="skip" id="skip" type="button">skip</button>
+  </header>
+  <main class="doc" id="doc">
+    <p>A line or two about you, with a <a href="#">link</a>.</p>
+    <h2>Work</h2>
+    <p>Whatever lives under the horizon.</p>
+  </main>
+
+<script id="frag" type="x-shader/x-fragment">
+precision highp float;
+uniform vec2  u_res;
+uniform float u_mat, u_seed, u_H, u_grain, u_vig, u_fin, u_time, u_stars;
+uniform vec3  u_sky;
+uniform vec4  u_crop;
+uniform sampler2D u_tex;
+
+float hash(vec2 p) {
+  p = fract((p + u_seed * 3.17) * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+float noise(vec2 p) {
+  vec2 i = floor(p), f = fract(p), u = f * f * (3. - 2. * f);
+  return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y);
+}
+float fbm(vec2 p) {
+  float v = 0., a = .5;
+  mat2 m = mat2(1.6, 1.2, -1.2, 1.6);
+  for (int i = 0; i < 6; i++) { v += a * noise(p); p = m * p; a *= .5; }
+  return v;
+}
+vec3 voro(vec2 p) {                     // (distance to nearest cell point, cell hash, cell hash 2)
+  vec2 i = floor(p), f = fract(p), mc = vec2(0.);
+  float md = 8.;
+  for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
+    vec2 g = vec2(float(x), float(y));
+    vec2 o = vec2(hash(i + g), hash(i + g + 19.7));
+    vec2 r = g + o - f;
+    float d = dot(r, r);
+    if (d < md) { md = d; mc = i + g; }
+  }
+  return vec3(sqrt(md), hash(mc + 3.1), hash(mc + 7.7));
+}
+// Voronoi with the distance to the nearest cell border (F2 - F1), and that cell's hash.
+vec3 voroEdge(vec2 p) {
+  vec2 i = floor(p), f = fract(p), mc = vec2(0.), mr = vec2(0.);
+  float md = 8.;
+  for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
+    vec2 g = vec2(float(x), float(y));
+    vec2 r = g + vec2(hash(i + g), hash(i + g + 19.7)) * .8 + .1 - f;
+    float dd = dot(r, r);
+    if (dd < md) { md = dd; mr = r; mc = i + g; }
+  }
+  float ed = 8.;
+  for (int y = -2; y <= 2; y++) for (int x = -2; x <= 2; x++) {
+    vec2 g = vec2(float(x), float(y));
+    vec2 r = g + vec2(hash(i + g), hash(i + g + 19.7)) * .8 + .1 - f;
+    if (dot(r - mr, r - mr) > .0001) ed = min(ed, dot(.5 * (mr + r), normalize(r - mr)));
+  }
+  return vec3(ed, hash(mc + 3.1), hash(mc + 7.7));
+}
+
+float seg(vec2 p, vec2 a, vec2 b) {
+  vec2 pa = p - a, ba = b - a;
+  return length(pa - ba * clamp(dot(pa, ba) / dot(ba, ba), 0., 1.));
+}
+float near(float x, float w, float px) { return 1. - smoothstep(w, w + px, x); }
+
+/* Every material gets: q (screen, y down, units of screen height), a (arc length
+   along the horizon, 0 at center), t (depth below the horizon), d = -t. */
+
+/* Stars for the end card: two layers drifting slowly sideways, each star twinkling at
+   its own rate. Positions are continuous inside each grid cell, so the drift never pops. */
+float stars(vec2 q) {
+  float s = 0.;
+  for (int L = 0; L < 2; L++) {
+    float fl = float(L);
+    float sc = mix(38., 90., fl);
+    vec2 g = (q + vec2(u_time * mix(.0035, .0016, fl), 0.)) * sc;
+    vec2 i = floor(g), f = fract(g);
+    float h = hash(i + fl * 31.);
+    if (h > mix(.55, .7, fl)) {
+      vec2 c = vec2(hash(i + 5.1), hash(i + 9.3)) * .8 + .1;
+      float rp = length(f - c) / sc * u_res.y;                 // distance in pixels
+      float b = mix(.35, 1., hash(i + 2.7)) * mix(1., .55, fl);
+      float tw = .55 + .45 * sin(u_time * mix(.7, 2.6, hash(i + 4.4)) + 6.283 * hash(i + 7.2));
+      s += b * tw * (exp(-rp * rp * .9) + .25 * exp(-rp * .9));  // core plus a faint halo
+    }
+  }
+  return s;
+}
+
+vec3 orbit(vec2 q, float a, float t, float d, float asp, float px, float fin) {
+  float sd = max(d, 0.);
+  float cen = exp(-a * a * mix(1.1, 2.4, fin));
+  vec3 warm = mix(vec3(1., .5, .16), vec3(.95, .72, .58), fin);
+  vec3 cool = mix(vec3(.33, .43, .58), vec3(.48, .72, .86), fin);
+  vec3 sky = mix(mix(vec3(.03, .033, .04), vec3(.045, .07, .12), fin),
+                 mix(vec3(.2, .23, .28), vec3(.11, .19, .28), fin), exp(-sd * 5.));
+  sky += cool * exp(-sd * mix(18., 26., fin)) * mix(.5, .9, fin);
+  sky += warm * exp(-sd * mix(60., 110., fin)) * cen * mix(1.4, .9, fin);
+  sky += warm * exp(-sd * 11.) * cen * mix(.22, .06, fin);
+  if (fin > .5) sky += vec3(.84, .9, 1.) * stars(q) * u_stars * smoothstep(.05, .32, d);
+  vec3 base = mix(vec3(.045, .038, .035), vec3(7., 11., 18.) / 255., fin);
+  float cl = fbm(vec2(a * 3., t * 26.) + 4.);
+  float lit = exp(-max(t, 0.) * mix(9., 22., fin));
+  vec3 g = base + mix(vec3(.5, .27, .11), vec3(.1, .17, .24), fin) * smoothstep(.35, .8, cl) * lit;
+  g += warm * exp(-max(t, 0.) * mix(120., 220., fin)) * cen * mix(1., .6, fin);
+  g += cool * exp(-max(t, 0.) * 60.) * .22;
+  return mix(sky, g, smoothstep(-px, px, t));
+}
+
+vec3 honey(vec2 q, float a, float t, float d, float asp, float px) {
+  float sd = max(d, 0.);
+  vec3 sky = vec3(.012, .008, .006) + vec3(.2, .06, .02) * exp(-sd * 14.) * exp(-a * a * .8);
+  vec2 p = vec2(a, t), k = vec2(5., 9.);
+  float h = fbm(p * k), hx = fbm((p + vec2(.004, 0.)) * k), hy = fbm((p + vec2(0., .004)) * k);
+  vec3 n = normalize(vec3((h - hx) * 7., (h - hy) * 7., 1.));
+  vec3 base = mix(vec3(.96, .67, .25), vec3(.78, .41, .1), smoothstep(0., .5, t));
+  base *= .9 + .22 * fbm(p * vec2(2., 3.) + 3.);
+  vec3 g = base * (.72 + .38 * clamp(dot(n, normalize(vec3(-.3, -.6, .8))), 0., 1.));
+  g += vec3(1., .9, .72) * pow(clamp(dot(n, normalize(vec3(.2, -.5, 1.))), 0., 1.), 40.) * .3;
+  vec3 v = voro(p * vec2(26., 30.));
+  float spk = step(.62, v.y) * (1. - smoothstep(.02 + .05 * v.z, .04 + .07 * v.z, v.x));
+  g = mix(g, vec3(.24, .09, .03), spk * .92);
+  g += vec3(.9, .55, .2) * step(.62, v.y) * (1. - smoothstep(.0, .03, abs(v.x - .06 - .05 * v.z))) * .25;
+  g = mix(g, vec3(.32, .05, .03), exp(-max(t, 0.) * 70.) * .9);
+  return mix(sky, g, smoothstep(-px, px, t));
+}
+
+vec3 oil(vec2 q, float a, float t, float d, float asp, float px) {
+  float sd = max(d, 0.);
+  float st = fbm(vec2(q.x * 1.5, q.y * 45.) + 7.);
+  vec3 sky = mix(vec3(.055, .042, .038), vec3(.14, .1, .075), st);
+  sky += vec3(.36, .3, .64) * exp(-sd * 28.) * (.45 + .7 * fbm(vec2(a * 6., sd * 80.)));
+  sky += vec3(.92, .88, 1.) * exp(-sd * 120.) * .3 * smoothstep(.5, .7, fbm(vec2(a * 18., 1.)));
+  vec2 p = vec2(a, t);
+  float w = fbm(p * vec2(2., 6.) + 11.);
+  float s = fbm(vec2(a * 1.4 + w * .6, t * 26.));
+  float br = noise(vec2(a * 4., t * 520.));
+  vec3 g = mix(vec3(.4, .21, .1), vec3(.84, .52, .27), smoothstep(.25, .7, s));
+  g = mix(g, vec3(.95, .83, .65), smoothstep(.62, .82, s) * .85);
+  g *= .84 + .26 * br;
+  g = mix(g, vec3(.28, .4, .56), exp(-max(t, 0.) * 40.) * .6);
+  return mix(sky, g, smoothstep(-px, px, t));
+}
+
+vec3 soil(vec2 q, float a, float t, float d, float asp, float px) {
+  float tt = t + (fbm(vec2(a * 10., 2.)) - .5) * .05 + (noise(vec2(a * 55., 5.)) - .5) * .012;
+  vec2 L = vec2(asp * .32, u_H - .3);
+  float ld = length(q - L);
+  vec3 sky = mix(vec3(.11, .02, .01), vec3(.93, .4, .09), exp(-ld * 1.8));
+  sky = mix(sky, vec3(1., .63, .24), exp(-ld * 5.) * .6);
+  sky *= .9 + .15 * fbm(q * 3.);
+  vec3 g = vec3(.07, .012, .01) * (.7 + .6 * fbm(vec2(a, t) * 30.));
+  g += vec3(.78, .3, .08) * exp(-max(tt, 0.) * 50.) * fbm(vec2(a * 35., tt * 35.)) * 1.2;
+  return mix(sky, g, smoothstep(-px, px, tt));
+}
+
+vec3 agate(vec2 q, float a, float t, float d, float asp, float px) {
+  float w = t + (fbm(vec2(a * 4., t * 4.) + 5.) - .5) * .05 + (noise(vec2(a * 60., t * 60.)) - .5) * .008;
+  vec3 sky = vec3(.64, .27, .56) * (.94 + .08 * fbm(q * vec2(120., 140.)));
+  sky += vec3(.07, .03, .05) * exp(-max(d, 0.) * 10.);
+  float bw = w - .04;
+  float b = .5 + .5 * sin(bw * 150. + fbm(vec2(a * 3., w * 20.)) * 4.);
+  vec3 g = mix(vec3(.79, .5, .69), vec3(.62, .55, .8), smoothstep(.2, .8, b));
+  g = mix(g, vec3(.96, .92, .95), smoothstep(.75, .95, fract(bw * 38. + fbm(vec2(a * 2., w * 9.)))));
+  g = mix(g, vec3(.95, .92, .9), smoothstep(.1, .24, w));
+  vec3 v = voro(vec2(a * 40., w * 60.));
+  float crys = smoothstep(.034, .04, w) * (1. - smoothstep(.055, .075, w));
+  g = mix(g, mix(vec3(.55, .45, .72), vec3(.93, .89, .99), v.y) * (.8 + .3 * v.x), crys * .8);
+  vec3 cr = mix(vec3(.13, .12, .08), vec3(.25, .23, .15), fbm(vec2(a, w) * 50.));
+  g = mix(g, cr, 1. - smoothstep(.034, .042, w));
+  g = mix(g, vec3(.98, .94, .84), 1. - smoothstep(0., .006, w));
+  return mix(sky, g, smoothstep(-px, px, w));
+}
+
+vec3 collage(vec2 q, float a, float t, float d, float asp, float px) {
+  vec3 sky = vec3(.89, .75, .22) * (.9 + .12 * fbm(q * vec2(6., 60.))) * (.95 + .08 * fbm(q * 40.));
+  float pl = min(min(seg(q, vec2(asp * .16, 1.), vec2(asp * .56, 0.)), seg(q, vec2(asp * .62, .05), vec2(asp * .7, .6))), seg(q, vec2(asp * .8, 0.), vec2(asp * .86, .7)));
+  sky = mix(sky, vec3(.3, .24, .12), near(pl, .0009, px) * .6);
+  float sx = asp * .1 + (noise(vec2(q.y * 30., 1.)) - .5) * .012;
+  float sw = .022 + (noise(vec2(q.y * 25., 4.)) - .5) * .01;
+  sky = mix(sky, vec3(.95, .93, .87) * (.95 + .05 * fbm(q * 50.)), near(abs(q.x - sx), sw, px));
+  // Woodcut: contour lines of a warped grain field, cut with a ragged edge like a print.
+  vec2 wp = vec2(a * 1.1, t * 7.);
+  float v = (fbm(wp + fbm(wp * 2.2 + 3.) * .9) + t * 1.2) * 22.;
+  float edge = (noise(vec2(a * 160., t * 90.)) - .5) * .22;
+  vec3 g = mix(vec3(.1, .085, .07), vec3(.87, .8, .65), smoothstep(.36, .44, fract(v) + edge));
+  g *= .9 + .12 * fbm(vec2(a, t) * 140.);
+  float paint = smoothstep(.74, .78, fbm(vec2(a * 3.2, t * 5.) + 21.)) * (1. - smoothstep(.1, .3, t));
+  g = mix(g, vec3(.96, .95, .92) * (.95 + .05 * fbm(vec2(a, t) * 60.)), paint);
+  g = mix(g, vec3(.08), 1. - smoothstep(0., .004, t));
+  return mix(sky, g, smoothstep(-px, px, t));
+}
+
+vec3 xray(vec2 q, float a, float t, float d, float asp, float px) {
+  float sd = max(d, 0.);
+  vec3 sky = vec3(.055) + vec3(.35) * exp(-sd * 60.);
+  vec2 p = vec2(a, t);
+  vec2 wq = p * 5. + vec2(fbm(p * 3.), fbm(p * 3. + 4.)) * 1.6;
+  float n = fbm(wq);
+  float cav = smoothstep(.48, .62, n);
+  float l = .93 - .25 * smoothstep(0., .6, t);
+  vec3 g = vec3(mix(l, .1, cav * .9));
+  g += vec3(.35) * exp(-abs(n - .55) * 25.) * (1. - cav);
+  float rr = length(p - vec2(-asp * .22, .32)) - .22;
+  g = mix(g, vec3(.86), near(abs(rr), .01, .004) * .7);
+  g = mix(g, g * .75, step(rr, 0.) * .4);
+  return mix(sky, g, smoothstep(-px, px, t));
+}
+
+vec3 cells(vec2 q, float a, float t, float d, float asp, float px) {
+  float sd = max(d, 0.);
+  vec3 sky = vec3(.02, .005, .008) + vec3(.15, .02, .03) * exp(-sd * 12.);
+  vec2 p = vec2(a, t);
+  float rid = 1. - abs(fbm(p * 9.) * 2. - 1.);
+  vec3 g = mix(vec3(.86, .42, .6), vec3(.6, .18, .36), smoothstep(0., .45, t));
+  g = mix(g, vec3(.97, .78, .85), exp(-max(t, 0.) * 25.) * .8);
+  g = mix(g, vec3(.98, .75, .85), smoothstep(.9, .97, rid) * .6);
+  vec3 col = mix(sky, g, smoothstep(-px, px, t));
+  float S = .15, k0 = floor(a / S);
+  for (int i = -1; i <= 1; i++) {
+    float k = k0 + float(i);
+    float ac = (k + .5) * S + (hash(vec2(k, 1.)) - .5) * S * .35;
+    float rr = S * (.16 + .3 * hash(vec2(k, 2.)));
+    vec2 lp = vec2(a - ac, t + rr * .55);
+    float bd = length(lp) - rr;
+    lp /= rr;
+    vec3 bc = mix(vec3(.75, .15, .08), vec3(.97, .52, .2), fbm(lp * 3. + k));
+    bc = mix(bc, vec3(.35, .05, .03), smoothstep(.55, .75, fbm(lp * 6. + k * 3.)) * .6);
+    bc *= 1. - .35 * smoothstep(-.25, 0., bd / rr);
+    bc += vec3(1., .8, .6) * exp(-dot(lp - vec2(-.3, -.4), lp - vec2(-.3, -.4)) * 12.) * .25;
+    col = mix(col, bc, 1. - smoothstep(-px, px, bd));
+  }
+  return col;
+}
+
+vec3 ink(vec2 q, float a, float t, float d, float asp, float px) {
+  vec3 paper = vec3(.89, .81, .64) * (.92 + .1 * fbm(q * 5.)) * (.97 + .05 * fbm(q * 60.));
+  paper = mix(paper, paper * .88, smoothstep(.66, .82, fbm(q * 7. + 3.)) * .35);
+  vec3 sp = voro(q * 90.);
+  paper = mix(paper, vec3(.35, .26, .16), step(.93, sp.y) * (1. - smoothstep(.05, .12, sp.x)) * .5);
+  float l1 = abs(d + (noise(vec2(a * 25., 1.)) - .5) * .003);
+  float l2 = abs(d - .011 + (noise(vec2(a * 18., 7.)) - .5) * .004);
+  float m = near(l1, px * .7, px);
+  m = max(m, near(l2, px * .5, px) * .75);
+  if (t > -.03) {
+    float K = 80., c0 = floor(a * K);
+    for (int i = -3; i <= 3; i++) {
+      float c = c0 + float(i);
+      float h1 = hash(vec2(c, 11.)), h2 = hash(vec2(c, 12.)), h3 = hash(vec2(c, 13.));
+      float ac = (c + .5) / K;
+      if (h1 < exp(-ac * ac * 1.6) * .9) {
+        float L = .05 + .42 * h2 * h2, tip = -.02 + .05 * h3;   // some reeds poke above the line
+        float s = (t - tip) / L;
+        if (s > 0. && s < 1.) {
+          float lean = (h3 - .5) * .09 + (h2 - .5) * .04;
+          float x = ac + lean * (1. - s) * (1. - s) + (noise(vec2(c, t * 30.)) - .5) * .005;
+          float wd = (.0008 + .0022 * h1 * h1) * (.35 + .65 * s);
+          m = max(m, near(abs(a - x), wd, px) * (1. - smoothstep(.75, 1., s)));
+        }
+      }
+    }
+    // tangles of loops low in the grass
+    vec2 lp = vec2(a * 9., t * 9.);
+    float loops = abs(fbm(lp + fbm(lp * 2.) * 2.) - .5);
+    m = max(m, near(loops, .006, .004) * smoothstep(.05, .12, t) * (1. - smoothstep(.25, .4, t)) * exp(-a * a * 2.) * .8);
+  }
+  return mix(paper, vec3(.14, .1, .07), m * .9);
+}
+
+vec3 ice(vec2 q, float a, float t, float d, float asp, float px) {
+  float sd = max(d, 0.);
+  vec3 sky = mix(vec3(.015, .025, .04), vec3(.2, .3, .4), exp(-sd * 7.));
+  sky += vec3(.7, .85, .95) * exp(-sd * 70.) * .45;
+  vec2 p = vec2(a, t);
+  float n = fbm(p * vec2(2.5, 4.) + 2.);
+  vec3 g = mix(vec3(.8, .91, .96), vec3(.14, .38, .58), clamp(smoothstep(0., .45, t) + (n - .5) * .7, 0., 1.));
+  float cr = pow(1. - abs(fbm(p * vec2(4., 7.) + 9.) * 2. - 1.), 14.);
+  float cr2 = pow(1. - abs(fbm(p * vec2(11., 16.) + 3.) * 2. - 1.), 24.);
+  g = mix(g, vec3(.04, .16, .32), cr * .85);
+  g = mix(g, vec3(.92, .98, 1.), cr2 * .5);
+  vec3 v = voro(p * vec2(30., 40.));
+  g += vec3(.85, .95, 1.) * step(.9, v.y) * (1. - smoothstep(0., .06, v.x)) * .5 * exp(-max(t, 0.) * 4.);
+  g = mix(g, vec3(.96, .99, 1.), exp(-max(t, 0.) * 80.) * .85);
+  return mix(sky, g, smoothstep(-px, px, t));
+}
+
+vec3 marble(vec2 q, float a, float t, float d, float asp, float px) {
+  float sd = max(d, 0.);
+  vec3 sky = mix(vec3(.025, .05, .04), vec3(.09, .15, .12), exp(-sd * 6.));
+  sky += vec3(.5, .6, .5) * exp(-sd * 50.) * .25;
+  vec2 p = vec2(a, t);
+  vec2 w = p * vec2(1.6, 3.) + vec2(fbm(p * 2.5), fbm(p * 2.5 + 5.)) * 1.4;
+  float vein = 1. - smoothstep(0., .035, abs(fbm(w) - .5));
+  float fine = 1. - smoothstep(0., .012, abs(fbm(w * 2.3 + 7.) - .5));
+  vec3 g = mix(vec3(.93, .91, .86), vec3(.82, .8, .76), fbm(p * 8.));
+  g = mix(g, vec3(.42, .4, .38), vein * .75);
+  g = mix(g, vec3(.68, .56, .35), fine * .45);
+  g *= 1. - .25 * smoothstep(0., .6, t);
+  g += vec3(.15) * exp(-max(t, 0.) * 120.);
+  return mix(sky, g, smoothstep(-px, px, t));
+}
+
+vec3 ocean(vec2 q, float a, float t, float d, float asp, float px) {
+  float sd = max(d, 0.);
+  vec3 sky = mix(vec3(.16, .07, .2), vec3(.98, .52, .22), exp(-sd * 6.));
+  sky = mix(sky, vec3(1., .78, .45), exp(-sd * 30.) * .7);
+  float sa = a - .5;                                   // sun off to the right, clear of the caption
+  float sun = length(vec2(sa, d - .03)) - .05;
+  sky = mix(sky, vec3(1., .92, .75), 1. - smoothstep(-px, px, sun));
+  sky += vec3(1., .7, .4) * exp(-max(sun, 0.) * 18.) * .35;
+  float tt = max(t, 0.);
+  float rip = noise(vec2(a * 18. / (tt + .03), tt * 260.)) * .6 + noise(vec2(a * 50. / (tt + .03), tt * 700.)) * .4;
+  vec3 g = mix(vec3(.18, .1, .16), vec3(.03, .04, .09), smoothstep(0., .4, tt));
+  g += vec3(.5, .25, .2) * exp(-tt * 18.) * .4;
+  g += vec3(1., .75, .45) * exp(-sa * sa / (.002 + tt * .05)) * smoothstep(.55, .85, rip) * 1.4;
+  g += vec3(.9, .5, .3) * smoothstep(.75, .95, rip) * .15 * exp(-tt * 6.);
+  return mix(sky, g, smoothstep(-px, px, t));
+}
+
+vec3 topo(vec2 q, float a, float t, float d, float asp, float px) {
+  vec3 paper = vec3(.9, .87, .79) * (.95 + .06 * fbm(q * 40.));
+  vec3 sky = mix(paper, vec3(.74, .8, .84), .55 * (1. - exp(-max(d, 0.) * 4.)));
+  vec2 p = vec2(a, t);
+  float h = fbm(p * vec2(2.2, 3.5) + 1.) + t * .35;
+  float c = h * 26.;
+  float f = abs(fract(c) - .5);
+  float major = step(mod(floor(c + .5), 5.), .5);
+  float line = smoothstep(mix(.44, .4, major), mix(.48, .46, major), f);
+  vec3 g = mix(paper, vec3(.78, .83, .66), smoothstep(.45, .75, h) * .6);
+  g = mix(g, vec3(.45, .3, .18), line * mix(.6, .9, major));
+  g = mix(g, vec3(.3, .2, .12), 1. - smoothstep(0., .003, t));
+  return mix(sky, g, smoothstep(-px, px, t));
+}
+
+vec3 moss(vec2 q, float a, float t, float d, float asp, float px) {
+  float sd = max(d, 0.);
+  vec3 sky = mix(vec3(.5, .56, .5), vec3(.82, .85, .8), exp(-sd * 5.)) * (.95 + .08 * fbm(q * 3.));
+  vec2 p = vec2(a, t);
+  vec3 v = voro(p * vec2(70., 90.));
+  vec3 v2 = voro(p * vec2(18., 24.) + 3.);
+  float clump = smoothstep(.3, .75, fbm(p * vec2(6., 9.)));
+  vec3 g = mix(vec3(.08, .16, .04), vec3(.42, .58, .14), clump);
+  g *= .65 + .5 * (1. - v.x);
+  g = mix(g, g * .55, smoothstep(.2, .6, v2.x) * .5);
+  g += vec3(.8, .9, .4) * step(.85, v.y) * (1. - smoothstep(0., .25, v.x)) * .35;
+  g *= 1. - .4 * smoothstep(0., .6, t);
+  float tt = t + (noise(vec2(a * 220., 1.)) - .5) * .01;
+  return mix(sky, g, smoothstep(-px, px, tt));
+}
+
+vec3 dunes(vec2 q, float a, float t, float d, float asp, float px) {
+  float sd = max(d, 0.);
+  vec3 sky = mix(vec3(.52, .62, .78), vec3(.98, .86, .7), exp(-sd * 7.));
+  vec2 p = vec2(a, t);
+  float w = fbm(p * vec2(1.5, 3.) + 4.);
+  float r = fract(a * 2.2 + w * 1.8 + t * 9.);
+  float lit = smoothstep(0., .08, r) * (1. - smoothstep(.55, 1., r));
+  vec3 g = mix(vec3(.42, .2, .18), vec3(.93, .6, .33), lit);
+  g = mix(g, vec3(.98, .78, .5), smoothstep(.02, .06, r) * (1. - smoothstep(.06, .14, r)) * .6);
+  g *= .9 + .12 * noise(vec2(a * 300., t * 900.));
+  g = mix(g, vec3(.85, .7, .6), exp(-max(t, 0.) * 30.) * .5);
+  return mix(sky, g, smoothstep(-px, px, t));
+}
+
+vec3 lava(vec2 q, float a, float t, float d, float asp, float px) {
+  float sd = max(d, 0.);
+  vec3 sky = vec3(.01, .005, .005) + vec3(.6, .12, .02) * exp(-sd * 16.) * exp(-a * a * .6) + vec3(.2, .05, .02) * exp(-sd * 4.);
+  vec2 p = vec2(a, t);
+  vec2 w = p * vec2(4., 6.) + vec2(fbm(p * 3.), fbm(p * 3. + 2.)) * .8;
+  float glow = max(pow(1. - abs(fbm(w) * 2. - 1.), 10.), pow(1. - abs(fbm(w * 2.6 + 5.) * 2. - 1.), 16.) * .7);
+  vec3 g = vec3(.035, .03, .035) * (.6 + .8 * fbm(p * 40.));
+  g += vec3(1., .3, .03) * glow * 1.3 + vec3(1., .85, .4) * pow(glow, 4.) * .9;
+  g += vec3(.9, .25, .03) * exp(-max(t, 0.) * 25.) * .6;
+  return mix(sky, g, smoothstep(-px, px, t));
+}
+
+// Risograph print: blue halftone dots sized by tone, a pink sun overprinted at another screen angle.
+vec3 halftone(vec2 q, float a, float t, float d, float asp, float px) {
+  vec3 paper = vec3(.95, .92, .85) * (.96 + .05 * fbm(q * 50.));
+  vec2 p = vec2(a, t);
+  float ts = .03 + .45 * exp(-max(d, 0.) * 7.);
+  float tg = .45 + .55 * smoothstep(.2, .8, fbm(p * vec2(3., 5.) + 2.));
+  float tone = mix(ts, tg, smoothstep(-px, px, t));
+  vec2 c = fract(mat2(.966, -.259, .259, .966) * q * 110.) - .5;
+  vec3 col = mix(paper, vec3(.13, .25, .62), 1. - smoothstep(-.06, .06, length(c) - sqrt(tone) * .56));
+  float sun = length(q - vec2(asp * .5 + .3, u_H - .14)) - .1;
+  vec2 c2 = fract(mat2(.87, -.5, .5, .87) * q * 110.) - .5;
+  float pink = (1. - smoothstep(-px, px, sun)) * (1. - smoothstep(-.06, .06, length(c2) - .42));
+  return mix(col, col * vec3(1., .42, .58), pink * .9);
+}
+
+// Cyanotype: Prussian-blue sun print. Fern fronds laid on the planet print white; the rim is
+// a thin line of bare paper where the brushed coating stops.
+vec3 cyanotype(vec2 q, float a, float t, float d, float asp, float px) {
+  float sd = max(d, 0.);
+  float brush = fbm(vec2(q.x * 1.2, q.y * 38.) + 3.);
+  vec3 sky = mix(vec3(.03, .12, .3), vec3(.07, .22, .46), brush);
+  sky += vec3(.2, .42, .66) * exp(-sd * 14.) * .55;
+  vec2 p = vec2(a, t);
+  vec3 g = mix(vec3(.04, .17, .4), vec3(.015, .07, .2), smoothstep(0., .5, t));
+  g *= .88 + .2 * fbm(p * vec2(4., 30.) + 8.);
+  // fronds: a stem from just above the rim down into the planet, chevron leaflets on both sides
+  float m = 0.;
+  float K = 6., c0 = floor(a * K);
+  for (int i = -2; i <= 2; i++) {
+    float c = c0 + float(i);
+    float h1 = hash(vec2(c, 21.)), h2 = hash(vec2(c, 22.)), h3 = hash(vec2(c, 23.));
+    if (h1 < .75) {
+      float ac = (c + .2 + .6 * h2) / K;
+      float L = .2 + .32 * h3, tip = -.03 + .03 * h1;
+      float s = (t - tip) / L;
+      if (s > -.02 && s < 1.) {
+        float lean = (h2 - .5) * 1.1;                                     // fronds splay sideways as they go down
+        float v = a - ac - lean * s * s * L;
+        float sc = clamp(s, 0., 1.);
+        float env = L * .2 * pow(sin(3.1416 * sqrt(sc)), 1.3);
+        float av = abs(v) / max(env, 1e-4);
+        float ph = fract(sc * (14. + 10. * h3) - av * .9);                // pinnae sweep back toward the tip
+        float leaf = (1. - smoothstep(.62 - .25 * av, .7 - .25 * av, abs(ph - .5) * 2.)) * (1. - smoothstep(.85, 1., av));
+        float stem = near(abs(v), .0012 + .0014 * (1. - sc), px);
+        m = max(m, max(leaf * step(.04, sc), stem) * smoothstep(-.02, .02, s) * (1. - smoothstep(.85, 1., sc)));
+      }
+    }
+  }
+  vec3 white = vec3(.86, .92, .95) * (.9 + .1 * fbm(q * 60.));
+  g = mix(g, white, m * .92);
+  vec3 col = mix(sky, g, smoothstep(-px, px, t));
+  col = mix(col, white, m * .92 * (1. - smoothstep(-px, px, t)));      // fronds that poke above the rim
+  float rim = abs(t - .004 + (noise(vec2(a * 40., 2.)) - .5) * .004);
+  col = mix(col, white, near(rim, .0016 + .0012 * noise(vec2(a * 90., 6.)), px) * .9);
+  return col;
+}
+
+// Stained glass: jewel panes in lead cames, lit from behind; pale quarries above, an amber
+// rondel off to the left, and a heavy lead line on the rim.
+vec3 glass(vec2 q, float a, float t, float d, float asp, float px) {
+  float sd = max(d, 0.);
+  float back = .55 + .65 * exp(-a * a * 1.5);                         // the light behind the window
+  vec3 vs = voroEdge(q * 3.2 + 2.);
+  vec3 sky = mix(vec3(.16, .3, .5), vec3(.42, .58, .74), vs.y) * (.55 + .2 * vs.z);
+  sky *= .85 + .3 * fbm(q * vec2(7., 2.) + vs.y * 9.);                // streaky glass
+  sky += vec3(.5, .6, .7) * exp(-sd * 18.) * .25;
+  float lead = near(vs.x, .006, px * 2.);
+  vec2 rc = vec2(asp * .5 - .55, u_H - .2);
+  float rr = length(q - rc);
+  float ring = abs(rr - .085);
+  float ang = atan(q.y - rc.y, q.x - rc.x);
+  vec3 ron = mix(vec3(1., .72, .2), vec3(.95, .45, .08), smoothstep(0., .085, rr));
+  sky = mix(sky, ron * (.85 + .3 * fbm(q * 30.)), 1. - smoothstep(.085 - px, .085 + px, rr));
+  lead = max(lead * smoothstep(.08, .1, rr), near(ring, .005, px * 2.));
+  lead = max(lead, near(abs(sin(ang * 4.)) * rr, .004, px * 2.) * step(rr, .085) * step(.02, rr));
+  sky = mix(sky * back, vec3(.03, .03, .035), lead);
+  vec2 p = vec2(a, t);
+  vec3 v = voroEdge(p * vec2(9., 11.) + 5.);
+  float k = v.y * 4.;
+  vec3 jc = k < 1. ? vec3(.62, .04, .08) : k < 2. ? vec3(.05, .15, .6) : k < 3. ? vec3(.04, .45, .2) : vec3(.92, .58, .08);
+  vec3 g = jc * (.6 + .5 * v.z) * (.8 + .4 * fbm(p * vec2(20., 6.) + v.y * 13.));
+  g += vec3(1., .9, .7) * pow(fbm(p * 30. + v.z * 7.), 6.) * .4;   // seeds and bubbles
+  g *= back * (1. - .45 * smoothstep(0., .55, t));
+  g = mix(g, vec3(.03, .03, .035), near(v.x, .009, px * 2.));
+  vec3 col = mix(sky, g, smoothstep(-px, px, t));
+  col = mix(col, vec3(.02), near(abs(t - .004), .006, px * 1.5));       // the heavy came on the rim
+  col += vec3(.9, .8, .6) * near(abs(t - .004), .0012, px) * .25 * back; // a glint along it
+  return col;
+}
+
+vec2 mirror(vec2 uv) { return 1. - abs(1. - mod(uv, 2.)); }
+vec3 painting(vec2 q, float a, float t, float d, float asp, float px) {
+  float gh = 1. - u_H;
+  float u = u_crop.x + (a / asp) * u_crop.z;
+  vec3 g = texture2D(u_tex, mirror(vec2(u, u_crop.y + (max(t, 0.) / gh - .5) * u_crop.w))).rgb;
+  g = pow(g, vec3(1.06)) * 1.05;
+  vec2 eu = vec2(u, u_crop.y - .5 * u_crop.w + .015);
+  vec3 edge = (texture2D(u_tex, mirror(eu)).rgb + texture2D(u_tex, mirror(eu + vec2(.04, .01))).rgb
+             + texture2D(u_tex, mirror(eu - vec2(.04, -.01))).rgb) / 3.;
+  vec3 sky = u_sky * (.75 + .5 * q.y / u_H) + edge * exp(-max(d, 0.) * 14.) * .55;
+  sky *= .94 + .1 * fbm(q * vec2(4., 30.));
+  g += edge * exp(-max(t, 0.) * 160.) * .35;
+  return mix(sky, g, smoothstep(-px, px, t));
+}
+
+void main() {
+  vec2 q = vec2(gl_FragCoord.x, u_res.y - gl_FragCoord.y) / u_res.y;
+  float asp = u_res.x / u_res.y;
+  float px = 1.4 / u_res.y;
+  float R = max(asp, .8) * 1.7;
+  vec2 dv = q - vec2(asp * .5, u_H + R);
+  float d = length(dv) - R;
+  float t = -d;
+  float a = atan(dv.x, -dv.y) * R;
+  int m = int(u_mat + .5);
+  vec3 col;
+  if      (m == 0)  col = orbit(q, a, t, d, asp, px, 0.);
+  else if (m == 1)  col = honey(q, a, t, d, asp, px);
+  else if (m == 2)  col = oil(q, a, t, d, asp, px);
+  else if (m == 3)  col = agate(q, a, t, d, asp, px);
+  else if (m == 4)  col = painting(q, a, t, d, asp, px);
+  else if (m == 5)  col = soil(q, a, t, d, asp, px);
+  else if (m == 6)  col = collage(q, a, t, d, asp, px);
+  else if (m == 7)  col = xray(q, a, t, d, asp, px);
+  else if (m == 8)  col = cells(q, a, t, d, asp, px);
+  else if (m == 9)  col = ink(q, a, t, d, asp, px);
+  else if (m == 11) col = ice(q, a, t, d, asp, px);
+  else if (m == 12) col = marble(q, a, t, d, asp, px);
+  else if (m == 13) col = ocean(q, a, t, d, asp, px);
+  else if (m == 14) col = topo(q, a, t, d, asp, px);
+  else if (m == 15) col = moss(q, a, t, d, asp, px);
+  else if (m == 16) col = dunes(q, a, t, d, asp, px);
+  else if (m == 17) col = lava(q, a, t, d, asp, px);
+  else if (m == 18) col = halftone(q, a, t, d, asp, px);
+  else if (m == 19) col = cyanotype(q, a, t, d, asp, px);
+  else if (m == 20) col = glass(q, a, t, d, asp, px);
+  else              col = orbit(q, a, t, d, asp, px, u_fin);   // 10: the end card; u_fin runs 0 → 1 as it settles
+  vec2 vq = (q - vec2(asp * .5, .5)) / vec2(asp, 1.);
+  col *= 1. - u_vig * dot(vq, vq) * 1.6;
+  col += (hash(gl_FragCoord.xy * .731 + 17.) - .5) * u_grain;
+  gl_FragColor = vec4(max(col, 0.), 1.);
+}
+</script>
+
+<script>
+const TITLE = ["Towards the", "horizon"];   // the words held over the first shots
+const NAME = "Your Name";                   // lands on the end card
+
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+[...$("#doc").children].forEach((c, i) => c.style.setProperty("--i", Math.min(i, 6)));
+
+/* ═══ The film ══════════════════════════════════════════════════════════ */
+
+// Images used as planet surfaces. cy/sh: which band of the image to show (center, height, as fractions).
+const PAINT = {
+  // key: { src: "photo.jpg", cy: .45, sh: .45, sky: [.05, .04, .08] },
+  //   cy/sh: vertical center and height of the band of the image to show (fractions);
+  //   sky: RGB of the sky above it. Use it in FRAMES as { m: M.paint, tex: "key" }.
+};
+const M = { orbit: 0, honey: 1, oil: 2, agate: 3, paint: 4, soil: 5, collage: 6, xray: 7, cells: 8, ink: 9, end: 10,
+            ice: 11, marble: 12, ocean: 13, topo: 14, moss: 15, dunes: 16, lava: 17, halftone: 18, cyanotype: 19, glass: 20 };  // ids 0–20 taken; 4 = photo, 10 = end card
+const LIGHT = "#f4ede4", DARK = "#231b14";
+
+// The cut list. Words carry across cuts the way the film holds a word over several shots.
+// Every frame shares the same horizon, so the landing on the final shot doesn't jump.
+// A photo frame whose image hasn't loaded yet is skipped, so the film never waits.
+const FRAMES = [
+  { m: M.orbit,    seed: 1,  cap: TITLE[0] },
+  { m: M.honey,    seed: 2,  cap: TITLE[0] },
+  { m: M.oil,      seed: 3,  cap: TITLE[1] },
+  { m: M.ocean,    seed: 4,  cap: TITLE[1] },
+  { m: M.agate,    seed: 5,  cap: TITLE[1] },
+  { m: M.marble,   seed: 6,  cap: TITLE[1] },
+  { m: M.soil,     seed: 7 },
+  { m: M.glass,    seed: 21 },
+  { m: M.ice,      seed: 8 },
+  { m: M.collage,  seed: 9 },
+  { m: M.dunes,    seed: 10 },
+  { m: M.xray,     seed: 11 },
+  { m: M.halftone, seed: 12 },
+  { m: M.lava,     seed: 13 },
+  { m: M.cyanotype, seed: 22 },
+  { m: M.cells,    seed: 14 },
+  { m: M.topo,     seed: 15 },
+  { m: M.ink,      seed: 16 },
+  { m: M.moss,     seed: 17 },
+  { m: M.agate,    seed: 18 },
+  { m: M.ice,      seed: 19 },
+  { m: M.honey,    seed: 20 },
+];
+const FINAL = { m: M.end, seed: 40, cap: NAME, final: true };
+const ON_PAPER = new Set([M.ink, M.topo, M.halftone, M.dunes, M.moss]);
+const capColor = (f) => ON_PAPER.has(f.m) ? DARK : LIGHT;
+
+// Exponential cut lengths: 1.5s for the first shot down to ~3ms for the last.
+const FIRST_MS = 1500, LAST_MS = 3;
+
+const hero = $("#hero"), canvas = $("#film"), cap = $("#cap");
+const params = new URLSearchParams(location.search);
+const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const horizon = () => parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--H")) || .55;
+
+let gl, prog, U = {}, textures = {};
+
+function initGL() {
+  gl = canvas.getContext("webgl", { antialias: false, alpha: false, preserveDrawingBuffer: true });
+  if (!gl) return false;
+  const vs = gl.createShader(gl.VERTEX_SHADER);
+  gl.shaderSource(vs, "attribute vec2 p; void main(){ gl_Position = vec4(p, 0., 1.); }");
+  gl.compileShader(vs);
+  const fs = gl.createShader(gl.FRAGMENT_SHADER);
+  gl.shaderSource(fs, $("#frag").textContent);
+  gl.compileShader(fs);
+  if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
+    const log = gl.getShaderInfoLog(fs);
+    console.error("Shader failed to compile:\n" + log);
+    document.body.dataset.gl = "failed"; document.body.dataset.glLog = log;
+    return false;
+  }
+  prog = gl.createProgram();
+  gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return false;
+  gl.useProgram(prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(prog, "p");
+  gl.enableVertexAttribArray(loc);
+  gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  for (const n of ["u_res", "u_mat", "u_seed", "u_H", "u_grain", "u_vig", "u_fin", "u_time", "u_stars", "u_sky", "u_crop", "u_tex"]) U[n] = gl.getUniformLocation(prog, n);
+  return true;
+}
+
+function loadTexture(key) {
+  if (textures[key]) return Promise.resolve();
+  return new Promise((res) => {
+    const img = new Image();
+    if (/^https?:/.test(PAINT[key].src)) img.crossOrigin = "anonymous";
+    img.onload = () => {
+      const tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB, gl.RGB, gl.UNSIGNED_BYTE, img); } catch (e) { return res(); }
+      for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
+      textures[key] = { tex, w: img.naturalWidth, h: img.naturalHeight };
+      res();
+    };
+    img.onerror = () => res();
+    img.src = PAINT[key].src;
+  });
+}
+// In order of appearance, so the early photo frames are the first ready.
+const loadAll = () => Promise.all([...new Set(FRAMES.filter((f) => f.tex).map((f) => f.tex))].map(loadTexture));
+
+function size(hi) {
+  // The montage renders at 1x so fast cuts never drop; the frame that stays renders sharp.
+  const dpr = hi ? Math.min(devicePixelRatio || 1, 2) : 1;
+  const w = Math.round(hero.clientWidth * dpr), h = Math.round(hero.clientHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  gl.viewport(0, 0, w, h);
+}
+
+// sky: the end card's live star field ({ time in s, stars 0..1 for the fade-in}).
+let sky = { time: 0, stars: 1 };
+function draw(f) {
+  const H = horizon() + (f.final ? 0 : ((f.seed * 7) % 3 - 1) * .006);   // a hair of jitter between cuts, like hand-made shots
+  hero.style.setProperty("--H", H);
+  if (!gl || gl.isContextLost()) return;
+  size(!!f.final);
+  gl.uniform2f(U.u_res, canvas.width, canvas.height);
+  gl.uniform1f(U.u_mat, f.m);
+  gl.uniform1f(U.u_seed, f.seed);
+  gl.uniform1f(U.u_H, H);
+  gl.uniform1f(U.u_fin, f.final ? 1 : 0);
+  gl.uniform1f(U.u_time, sky.time);
+  gl.uniform1f(U.u_stars, sky.stars);
+  gl.uniform1f(U.u_grain, .07);                  // the last shot is graded like every other shot
+  gl.uniform1f(U.u_vig, .55);
+  gl.uniform3f(U.u_sky, 0, 0, 0);
+  if (f.tex && textures[f.tex]) {
+    const P = PAINT[f.tex], T = textures[f.tex];
+    const groundAspect = (canvas.width / canvas.height) / (1 - H), imgAspect = T.w / T.h;
+    let sh = P.sh, sw = groundAspect * sh / imgAspect;
+    if (sw > .88) { sw = .88; sh = sw * imgAspect / groundAspect; }   // stay inside the image at the curved edges
+    const cy = Math.min(Math.max(P.cy, sh / 2), 1 - sh / 2);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, T.tex);
+    gl.uniform1i(U.u_tex, 0);
+    gl.uniform4f(U.u_crop, .5, cy, sw, sh);
+    gl.uniform3f(U.u_sky, ...P.sky);
+  }
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+function setCaption(text, color, slow, asLink) {
+  cap.style.setProperty("--cap", color);
+  cap.style.setProperty("--cap-shadow", color === DARK ? 0 : .3);
+  if (cap.dataset.text === text) return;
+  cap.dataset.text = text;
+  cap.innerHTML = asLink ? `<a href="#" id="replay" title="Play again">${esc(text)}</a>` : esc(text);
+  cap.classList.remove("focus", "focus-slow");
+  void cap.offsetWidth;
+  if (text) cap.classList.add(slow ? "focus-slow" : "focus");
+}
+
+let raf = 0, timers = [], playing = false;
+const later = (ms, fn) => timers.push(setTimeout(fn, ms));
+
+// The landing. The end card is just the last cut, graded like every other shot; it simply
+// stays. Then its stars fade in and keep twinkling and drifting, the name focuses in on the
+// horizon, and the page rises in.
+const STARS_IN_MS = 2600;
+const ease = (x) => 1 - Math.pow(1 - x, 3);
+let skyRaf = 0, skyT0 = 0, heroVisible = true;
+
+function reveal(instant) {
+  $("#doc").style.setProperty("--base", instant ? "0s" : ".1s");
+  document.body.classList.remove("hide-doc");
+}
+
+// Keeps the end card alive. Only runs while the hero is on screen, at most ~30 fps.
+function skyLoop(now) {
+  skyRaf = 0;
+  if (playing || !heroVisible) return;
+  if (now - (skyLoop.last || 0) > 31) {
+    skyLoop.last = now;
+    const e = now - skyT0;
+    sky.time = e / 1000 + 40;                    // start mid-drift so stars aren't all in phase
+    sky.stars = ease(Math.min(Math.max((e - 250) / STARS_IN_MS, 0), 1));
+    draw(FINAL);
+  }
+  skyRaf = requestAnimationFrame(skyLoop);
+}
+function startSky() {
+  skyT0 = performance.now();
+  if (reduced) { sky = { time: 40, stars: 1 }; draw(FINAL); return; }
+  sky.stars = 0; draw(FINAL);
+  if (!skyRaf) skyRaf = requestAnimationFrame(skyLoop);
+}
+new IntersectionObserver(([e]) => {
+  heroVisible = e.isIntersecting;
+  if (heroVisible && !playing && !skyRaf && !reduced && skyT0) skyRaf = requestAnimationFrame(skyLoop);
+}).observe(hero);
+
+function land(instant) {
+  cancelAnimationFrame(raf);
+  timers.forEach(clearTimeout); timers = [];
+  playing = false;
+  document.body.classList.remove("playing");
+  try { localStorage.setItem("horizon-intro-seen", "1"); } catch (e) {}
+  startSky();
+  if (instant || reduced) {
+    setCaption(FINAL.cap, LIGHT, true, true);
+    reveal(true);
+    return;
+  }
+  setCaption("", LIGHT);
+  later(600, () => setCaption(FINAL.cap, LIGHT, true, true));
+  later(1500, () => reveal(false));
+}
+
+function play() {
+  // Durations are fixed per slot, exponential from FIRST_MS to LAST_MS.
+  const dur = FRAMES.map((_, i) => FIRST_MS * Math.pow(LAST_MS / FIRST_MS, i / (FRAMES.length - 1)));
+  const ready = (f) => !f.tex || textures[f.tex];
+  playing = true;
+  document.body.classList.add("playing", "hide-doc");
+  $("#doc").style.setProperty("--base", "0s");
+  scrollTo({ top: 0, behavior: "instant" });
+  let i = 0, shownAt = performance.now();
+  draw(FRAMES[0]); setCaption(FRAMES[0].cap || "", capColor(FRAMES[0]));
+  const tick = (now) => {
+    // Advance at most one cut per screen refresh, so even the 3ms cuts are seen.
+    if (now - shownAt >= dur[i]) {
+      do i++; while (i < FRAMES.length && !ready(FRAMES[i]));
+      shownAt = now;
+      if (i >= FRAMES.length) return land();          // the last cut is the end card, and it stays
+      draw(FRAMES[i]); setCaption(FRAMES[i].cap || "", capColor(FRAMES[i]));
+    }
+    raf = requestAnimationFrame(tick);
+  };
+  raf = requestAnimationFrame(tick);
+}
+
+async function start() {
+  const ok = initGL();
+  if (ok) document.body.dataset.gl = "ok";
+  else { document.body.dataset.gl ||= "failed"; land(true); return; }
+
+  const only = params.get("frame");
+  if (only !== null) {                                  // debug: hold one frame
+    await loadAll();
+    if (only !== "end" && !FRAMES[+only]) console.warn(`?frame=${only} is out of range (0–${FRAMES.length - 1}); showing the end card.`);
+    const f = only === "end" ? FINAL : FRAMES[+only] || FINAL;
+    document.body.dataset.frames = FRAMES.length;
+    draw(f); setCaption(f.cap || "", capColor(f), true, !!f.final);
+    if (f.final) document.body.classList.remove("hide-doc");
+    addEventListener("resize", () => draw(f));
+    return;
+  }
+
+  let seen = false;
+  try { seen = localStorage.getItem("horizon-intro-seen") === "1"; } catch (e) {}
+  loadAll();                                            // streams in while the film plays
+  if (reduced || (seen && !params.has("intro"))) land(true);
+  else play();                                          // starts at once; never waits on images
+  addEventListener("resize", () => { if (!playing && !skyRaf) draw(FINAL); });
+}
+
+// If the GPU drops the canvas (tab in the background, back/forward cache), go straight to the page.
+canvas.addEventListener("webglcontextlost", (e) => { e.preventDefault(); if (playing) land(true); });
+canvas.addEventListener("webglcontextrestored", () => { if (initGL()) { textures = {}; loadAll(); draw(FINAL); } });
+addEventListener("pageshow", (e) => { if (e.persisted) land(true); });
+
+
+$("#skip").addEventListener("click", () => { if (playing) land(); });
+addEventListener("keydown", (e) => { if (playing && (e.key === "Escape" || e.key === " " || e.key === "Enter")) { e.preventDefault(); land(); } });
+cap.addEventListener("click", (e) => { if (e.target.id === "replay") { e.preventDefault(); if (!playing) play(); } });
+
+start();
+</script>
+</body>
+</html>
